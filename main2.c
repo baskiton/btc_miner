@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <termios.h>
 #include <time.h>
@@ -29,13 +30,12 @@
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
-//#define BITS 0x17023cc1
-//#define BITS 0x1e00ffff
-#define BITS 0x1d00ffff
-//#define BITS 0x1d123456
-
 #define SHA256_CHUNK_SZ 64
 #define NONCE_MAX (1ULL << 32)
+
+#define FD_CTRL 0
+#define FD_WORKER 1
+#define FD_TIMER 2
 
 typedef uint64_t uint256_t[4];
 
@@ -107,24 +107,35 @@ typedef struct {
     uint64_t len_be;
 } round2_block_t;
 
+// commands ////////////////////////////////////////////////////////////////////
+
+#define SOCKET_NAME "\0/tmp/btc_like"
+
+#define CMD_IN_NEW_JOB 1
+#define CMD_IN_STOP (-1)
+
+#define CMD_OUT_FOUND 100
+#define CMD_OUT_REQUEST 101
+
+////////////////////////////////////////////////////////////////////////////////
+
 // global variables ////////////////////////////////////////////////////////////
 volatile uint64_t nonce_cnt = 0;
 volatile uint32_t job_id = 0;
 volatile uint32_t winning_nonce = 0;
 volatile int block_found = 0;
 volatile int should_stop = 0;
+volatile int idle_workers = 0;
+int nprocs = 0;
+int edge_fd = -1;
 
 block128_t master_template;
 hash_t master_midstate = {};
 hash_t global_target = {};
 hash_t found_block_hash = {};
-hash_t master_prev_hash = {};
 
 pthread_mutex_t job_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t job_cond = PTHREAD_COND_INITIALIZER;
-
-volatile sig_atomic_t got_sigusr1 = 0;
-volatile sig_atomic_t got_sigstop = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -141,12 +152,6 @@ hash_reverse(uint32_t t[8])
 static inline void
 hash_swap(uint32_t *h)
 {
-    // for (int i = 0; i < 8; ++i)
-    //     h[i] = __builtin_bswap32(h[i]);     // only for le-arch
-
-    // for (uint32_t *i = h + 7; i >= h; --i)
-    //     *i = __builtin_bswap32(*i);
-
     h[0] = __builtin_bswap32(h[0]);     // only for le-arch
     h[1] = __builtin_bswap32(h[1]);     // only for le-arch
     h[2] = __builtin_bswap32(h[2]);     // only for le-arch
@@ -213,18 +218,6 @@ miner_worker(void *arg)
 
     uint32_t job_id_local = 0;
     chunk2_t chunk2;
-    // round2_block_t r2 = {
-    //         .hash = {},
-    //         .end = 0x80,
-    //         .pad = {},
-    //         .len_be = htobe64(sizeof(hash_t) * 8),  // 256
-    // };
-
-    // SHA256_CTX
-    //     r1_base_ctx,
-    //     r2_base_ctx,
-    //     r1_work_ctx,
-    //     r2_work_ctx;
 
     struct {
         SHA256_CTX r1_base_ctx,
@@ -252,13 +245,16 @@ miner_worker(void *arg)
             job_id_local = job_id;
             memcpy(&chunk2, &master_template.chunks.c2, sizeof(chunk2));
             memcpy(ctx.r1_base_ctx.h, master_midstate.u8, sizeof(master_midstate));
-            printf("[%i] new job %i\n", cfg->thread_id, job_id_local);
+            // printf("[%i] new job %i\n", cfg->thread_id, job_id_local);
         }
         pthread_mutex_unlock(&job_mutex);
 
         uint64_t start = __sync_fetch_and_add(&nonce_cnt, WORKER_RANGE_SZ);
-        if (unlikely(start > NONCE_MAX))
+        if (unlikely(start > NONCE_MAX)) {
+            if (__sync_add_and_fetch(&idle_workers, 1) >= nprocs)
+                eventfd_write(edge_fd, 1);
             continue;
+        }
         uint64_t end = start + WORKER_RANGE_SZ;
         if (unlikely(end > NONCE_MAX))
             end = NONCE_MAX;
@@ -274,26 +270,18 @@ miner_worker(void *arg)
             hash_swap(ctx.r1_work_ctx.h);
             ctx.r2.end = 0x80;
             ctx.r2.len_be = htobe64(sizeof(hash_t) * 8);
-            // memcpy(r2.hash.u32, r1_work_ctx.h, sizeof(hash_t));
             SHA256_Transform(&ctx.r2_work_ctx, (void *)&ctx.r2);
-
-            // if (unlikely(nonce == 0x49fd5c48)) {
-            //     printf("time=%i\n"
-            //            "bits=0x%08x\n"
-            //            "nonc=0x%08x\n",
-            //            (chunk2.time), (chunk2.bits), (chunk2.nonce));
-            //     hash_dump(ctx.r2_work_ctx.h);
-            // }
 
             if (unlikely(hash_check(ctx.r2_work_ctx.h, global_target.u32))) {
                 if (__sync_bool_compare_and_swap(&block_found, 0, 1)) {
                     winning_nonce = nonce;
                     memcpy(found_block_hash.u8, ctx.r2_work_ctx.h, sizeof(found_block_hash));
 
-                    printf("%08x ", winning_nonce);
+                    printf("<%08x> ", winning_nonce);
                     // hash_dump(work_ctx[1].h);
                     hash_dump(ctx.r2_work_ctx.h);
 
+                    eventfd_write(edge_fd, 1);
                     pthread_mutex_lock(&job_mutex);
                     pthread_cond_broadcast(&job_cond);
                     pthread_mutex_unlock(&job_mutex);
@@ -308,27 +296,6 @@ miner_worker(void *arg)
 ////////////////////////////////////////////////////////////////////////////////
 
 void
-signal_handler(int sig)
-{
-    switch (sig) {
-    case SIGUSR1:
-    case SIGUSR2:
-        got_sigusr1 = 1;
-        break;
-
-    case SIGHUP:
-    case SIGINT:
-    case SIGABRT:
-    case SIGTERM:
-        got_sigstop = 1;
-        break;
-
-    default:
-        break;
-    }
-}
-
-void
 hex_to_bytes(const char *hex_str, unsigned char *byte_array)
 {
     size_t len = strlen(hex_str);
@@ -339,28 +306,58 @@ hex_to_bytes(const char *hex_str, unsigned char *byte_array)
 int
 main()
 {
+    // blocking SIGPIPE
     sigset_t signal_set;
     sigemptyset(&signal_set);
-    sigaddset(&signal_set, SIGHUP);
-    sigaddset(&signal_set, SIGINT);
-    sigaddset(&signal_set, SIGABRT);
-    sigaddset(&signal_set, SIGTERM);
-    sigaddset(&signal_set, SIGUSR1);
-    sigaddset(&signal_set, SIGUSR2);
+    sigaddset(&signal_set, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &signal_set, NULL);
 
-    struct sigaction sa;
-    sa.sa_handler = signal_handler;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGHUP, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGUSR1, &sa, NULL);
-    sigaction(SIGUSR2, &sa, NULL);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return 1;
+    }
+    struct sockaddr_un addr = {
+            .sun_family = AF_UNIX,
+            .sun_path = SOCKET_NAME,
+    };
+    printf("Connect to controller... ");
+    fflush(stdout);
+    while (connect(fd, &addr, offsetof(struct sockaddr_un, sun_path) + sizeof(SOCKET_NAME) - 1) < 0) {
+        if (errno == ECONNREFUSED || errno == ENOENT) {
+            sleep(1);
+            continue;
+        }
+        perror("connect");
+        return 1;
+    }
+    printf("Done!\n");
 
-    int nprocs = get_nprocs();
+    if ((edge_fd = eventfd(0, EFD_NONBLOCK)) < 0) {
+        perror("eventfd");
+        return 1;
+    }
+    int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    if (timer_fd < 0) {
+        perror("timer_fd");
+        return 1;
+    }
+    struct itimerspec tspec = {
+            .it_interval = { .tv_sec = 1, },
+            .it_value = { .tv_sec = 1, },
+    };
+    if (timerfd_settime(timer_fd, 0, &tspec, 0) < 0) {
+        perror("timer_settime");
+        return 1;
+    }
+
+    struct pollfd fds[] = {
+            [FD_CTRL] = { .fd = fd, .events = POLLIN, },
+            [FD_WORKER] = { .fd = edge_fd, .events = POLLIN, },
+            [FD_TIMER] = { .fd = timer_fd, .events = POLLIN, },
+    };
+
+    nprocs = get_nprocs();
     pthread_t threads[nprocs];
     worker_cfg_t cfgs[nprocs];
     for (int i = 0; i < nprocs; ++i) {
@@ -368,77 +365,98 @@ main()
         pthread_create(&threads[i], 0, miner_worker, &cfgs[i]);
     }
 
+    uint64_t last_nonce = 0;
     master_template = (block128_t) {
         .full = {
                 .ver = 3,
-                .prev_hash = master_prev_hash,
+                .prev_hash = {},
                 .merkle_root = {},
                 .time = 0,
-                .bits = BITS,
+                .bits = 0,
                 .nonce = 0,
                 .end = 0x80,
                 .pad = {},
                 .len_be = htobe64(BLOCK_SZ * 8),
         },
     };
-    const char bh[] = "00401423bd5920eacafda4307b31b2607bc74b2ea506cffa4609020000000000000000007bf602eedbb613e09577c5725515e3a4d74d3fef7600730547ab3e6519a7d40d7d39906ac13c0217485cfd49";
-    hex_to_bytes(bh, master_template.raw_u8);
-
-    hash_target_create(master_template.full.bits, global_target.u32);
-    hash_dump(global_target.u32);
-
-    printf("vers=0x%08x\n"
-           "time=%i\n"
-           "bits=0x%08x\n"
-           "nonc=0x%08x\n",
-           (master_template.full.ver), (master_template.full.time), (master_template.full.bits), (master_template.full.nonce));
-    fputs("prev=", stdout);
-    hash_dump(master_template.full.prev_hash.u32);
-    fputs("merk=", stdout);
-    hash_dump(master_template.full.merkle_root.u32);
-    putchar('\n');
-    memcpy(master_prev_hash.u32, master_template.full.prev_hash.u32, 32);
-
-    uint64_t last_nonce;
-    struct timespec timeout;
 
     while (!should_stop) {
+        int rdy = poll(fds, sizeof(fds) / sizeof(*fds), -1);
+        if (rdy == -1) {
+            if (errno == EINTR)
+                continue;
+            perror("poll");
+            break;
+        }
+        if (!rdy)
+            continue;
+
         pthread_mutex_lock(&job_mutex);
 
-        if (job_id && block_found)
-            for (int i = 0; i < 8; ++i)
-                master_prev_hash.u32[i] = __builtin_bswap32(found_block_hash.u32[i]);
-            // memcpy(master_prev_hash.u8, found_block_hash.u8, sizeof(found_block_hash));
-        else if (got_sigusr1)
-            got_sigusr1 = 0;
+        if (fds[FD_CTRL].revents & POLLIN) {
+            int32_t cmd;
+            ssize_t sz = recv(fd, &cmd, sizeof(cmd), MSG_WAITALL);
 
-        ++job_id;
-        nonce_cnt = 0;
-        block_found = 0;
-        last_nonce = 0;
-        // memset(found_block_hash.u8, 0, sizeof(found_block_hash));
+            if (sz <= 0 || cmd == CMD_IN_STOP) {
+                printf("STOP!%s%s\n", (sz>0)? "": " [Error] ", (sz>0)? "": strerror(errno));
+                should_stop = 1;
+                pthread_cond_broadcast(&job_cond);
+                pthread_mutex_unlock(&job_mutex);
+                break;
+            }
+            if (cmd == CMD_IN_NEW_JOB) {
+                recv(fd, master_template.raw_u8, sizeof(block_t), MSG_WAITALL);
+                SHA256_CTX ctx;
+                SHA256_Init(&ctx);
+                SHA256_Transform(&ctx, (void *)&master_template);
+                memcpy(master_midstate.u32, ctx.h, sizeof(master_midstate));
+                hash_target_create(master_template.full.bits, global_target.u32);
+                idle_workers = 0;
+                ++job_id;
+                nonce_cnt = 0;
+                block_found = 0;
+                last_nonce = 0;
+                pthread_cond_broadcast(&job_cond);
+                printf("new job\n");
+            }
+        }
 
-        uint32_t cur_time = time(0);
-        master_template.full.prev_hash = master_prev_hash;
-        // master_template.full.time = cur_time;
-        // master_template.full.bits = BITS;
-        // master_template.full.nonce = 0;
-        fputs("prev=", stdout);
-        hash_dump(master_template.full.prev_hash.u32);
+        if (fds[FD_WORKER].revents & POLLIN) {
+            eventfd_read(edge_fd, &(eventfd_t){0});
+            if (block_found) {
+                uint32_t cmd = CMD_OUT_FOUND;
+                send(fd, &cmd, sizeof(uint32_t), 0);
+                send(fd, (void *)&winning_nonce, sizeof(winning_nonce), 0);
+                hash_reverse(found_block_hash.u32);
+                send(fd, found_block_hash.u8, 32, 0);
+                fsync(fd);
+                block_found = 0;
+                printf("reported\n");
+            }
+            else {
+                // all nonces have been used up
+                // if (unlikely(nonce_cnt >= NONCE_MAX))
+                uint32_t t = time(0);
+                if (t != master_template.full.time) {
+                    master_template.full.time = t;
+                    idle_workers = 0;
+                    ++job_id;
+                    nonce_cnt = 0;
+                    block_found = 0;
+                    last_nonce = 0;
+                    pthread_cond_broadcast(&job_cond);
+                }
+                else {
+                    uint32_t cmd = CMD_OUT_REQUEST;
+                    send(fd, &cmd, sizeof(uint32_t), 0);
+                    fsync(fd);
+                    printf("requested\n");
+                }
+            }
+        }
 
-        SHA256_CTX ctx;
-        SHA256_Init(&ctx);
-        SHA256_Transform(&ctx, (void *)&master_template);
-        memcpy(master_midstate.u32, ctx.h, sizeof(master_midstate));
-
-        pthread_cond_broadcast(&job_cond);
-        pthread_sigmask(SIG_UNBLOCK, &signal_set, NULL);
-
-        while (!block_found && nonce_cnt < NONCE_MAX && !got_sigstop && !got_sigusr1) {
-            clock_gettime(CLOCK_MONOTONIC, &timeout);
-            timeout.tv_sec += 1;
-
-            pthread_cond_clockwait(&job_cond, &job_mutex, CLOCK_MONOTONIC, &timeout);
+        if (fds[FD_TIMER].revents & POLLIN) {
+            read(timer_fd, &(uint64_t){0}, sizeof(uint64_t));
 
             uint64_t cur_nonce = nonce_cnt;
             if (cur_nonce > NONCE_MAX)
@@ -447,21 +465,12 @@ main()
             last_nonce = cur_nonce;
             double mhashes = (double)diff / 1000000.0;
             double progress = ((double)cur_nonce / (double )NONCE_MAX) * 100.0;
-            if (cur_nonce < NONCE_MAX && !block_found && !got_sigstop && !got_sigusr1) {
+            if (cur_nonce < NONCE_MAX && !block_found) {
                 printf(" -> %6.2f MH/s | %5.1f%%\n", mhashes, progress);
                 fflush(stdout);
             }
         }
-        pthread_sigmask(SIG_BLOCK, &signal_set, NULL);
 
-        if (got_sigstop) {
-            printf("STOP!\n");
-            should_stop = 1;
-            pthread_cond_broadcast(&job_cond);
-        }
-        else if (nonce_cnt >= NONCE_MAX && !block_found) {
-            printf("next round\n\n");
-        }
         pthread_mutex_unlock(&job_mutex);
     }
 

@@ -15,6 +15,10 @@ add_executable(btc_like
         main2.c
 )
 
+target_compile_options(btc_like
+        PRIVATE -pthread
+)
+
 target_link_libraries(btc_like
         crypto
 )
