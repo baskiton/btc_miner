@@ -20,7 +20,7 @@ CMD_REQUEST = 101
 
 
 class Controller:
-    def __init__(self, user, passw, wallet_addr, rpc_host='127.0.0.1', rpc_port=RPC_PORT_MAINNET):
+    def __init__(self, user, passw, rpc_host='127.0.0.1', rpc_port=RPC_PORT_MAINNET, wallet_addr=''):
         self.rpc = BtcRpcClient(user, passw, rpc_host, rpc_port)
         self.sk = None
 
@@ -86,7 +86,7 @@ class Controller:
             print(f'Miner detached{e and f"; cause: {str(e)}" or ""}', file=(e and sys.stderr or sys.stdout))
 
     def build_and_submit(self, nonce, t):
-        if not (self.cur_tmpl and self.block_hdr):
+        if not (self.cur_tmpl and self.block_hdr and self.addr_info):
             return
 
         with self.lock:
@@ -111,10 +111,12 @@ class Controller:
 
         try:
             # receive scriptPubKey
-            self.addr_info = x = self.rpc.validate_address(self.wallet_addr)
+            x = self.rpc.validate_address(self.wallet_addr)
             if not x['isvalid']:
-                raise ValueError(f'Invalid WALLET_ADDR: {x["error"]}')
-            self.pk_script = x['scriptPubKey']
+                print(f'Invalid WALLET_ADDR: {x["error"]}', file=sys.stderr)
+            else:
+                self.addr_info = x
+                self.pk_script = x['scriptPubKey']
 
         except Exception as e:
             print(e, file=sys.stderr)
