@@ -13,7 +13,6 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
-#include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/un.h>
 #include <time.h>
@@ -31,7 +30,6 @@ volatile uint32_t job_id = 0;
 volatile uint32_t winning_nonce = 0;
 volatile int block_found = 0;
 volatile int should_stop = 0;
-volatile int idle_workers = 0;
 int nprocs = 0;
 int edge_fd = -1;
 
@@ -43,23 +41,7 @@ hash_t found_block_hash = {};
 pthread_mutex_t job_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t job_cond = PTHREAD_COND_INITIALIZER;
 
-////////////////////////////////////////////////////////////////////////////////
-
-static int inline
-hash_check(const uint32_t h[8], const uint32_t t[8])
-{
-    for (int i = 8; i--;) {
-        if (likely(h[i] > t[i]))
-            return 0;
-        if (unlikely(h[i] < t[i]))
-            return 1;
-    }
-    return 1;
-}
-
 // thread pool /////////////////////////////////////////////////////////////////
-
-#define WORKER_RANGE_SZ (1ULL << 20)
 
 typedef struct {
     int thread_id;
@@ -68,27 +50,27 @@ typedef struct {
 void *
 miner_worker(void *arg)
 {
+    pthread_setname_np(pthread_self(), "worker");
     worker_cfg_t *cfg = arg;
+
+    cuda_init();
 
     uint32_t job_id_local = 0;
     chunk2_t chunk2;
 
-    struct {
-        SHA256_CTX r1_base_ctx,
-                r2_base_ctx;
-        union {
-            SHA256_CTX r1_work_ctx;
-            round2_block_t r2;
-        };
-        SHA256_CTX r2_work_ctx;
-    } ctx = {};
-
-    SHA256_Init(&ctx.r2_base_ctx);
+    uint32_t loop_cnt = 0;
+    int threads_per_block = 768;
+    int sm_count = 48;
+    int blocks_per_sm = 4096;
+    int total_blocks = sm_count * blocks_per_sm;
+    // uint32_t total_blocks = 48 * 88000; // full for one
+    cuda_get_tuned(&threads_per_block, &sm_count);
+    uint64_t gpu_range = (uint64_t)threads_per_block * total_blocks;
 
     while (1) {
         pthread_mutex_lock(&job_mutex);
         while (!should_stop && (nonce_cnt >= NONCE_MAX || block_found) && (job_id_local == job_id)) {
-            if (nonce_cnt >= NONCE_MAX && __sync_add_and_fetch(&idle_workers, 1) >= nprocs)
+            if (nonce_cnt >= NONCE_MAX)
                 eventfd_write(edge_fd, 1);
             pthread_cond_wait(&job_cond, &job_mutex);
         }
@@ -100,51 +82,52 @@ miner_worker(void *arg)
 
         if (unlikely(job_id_local != job_id)) {
             job_id_local = job_id;
+#if CUDASHA256_NOSWAP
+            chunk_swap32((void *)&chunk2, (void *)&master_template.chunks.c2, 16);
+#else
             memcpy(&chunk2, &master_template.chunks.c2, sizeof(chunk2));
-            memcpy(ctx.r1_base_ctx.h, master_midstate.u8, sizeof(master_midstate));
-            // printf("[%i] new job %i\n", cfg->thread_id, job_id_local);
+#endif
         }
         pthread_mutex_unlock(&job_mutex);
 
-        uint64_t start = __sync_fetch_and_add(&nonce_cnt, WORKER_RANGE_SZ);
-        __sync_add_and_fetch(&tot_nonce_cnt, WORKER_RANGE_SZ);
-        if (unlikely(start > NONCE_MAX))
+        uint64_t start = __sync_fetch_and_add(&nonce_cnt, gpu_range);
+
+        if ((start + gpu_range) > NONCE_MAX) {
+            __sync_add_and_fetch(&tot_nonce_cnt, NONCE_MAX - start);
             continue;
-        uint64_t end = start + WORKER_RANGE_SZ;
-        if (unlikely(end > NONCE_MAX))
-            end = NONCE_MAX;
+        }
+        else
+            __sync_add_and_fetch(&tot_nonce_cnt, gpu_range);
 
-        for (uint64_t nonce = start; nonce < end; ++nonce) {
-            if (unlikely(!(nonce & ((1 << 13) - 1)) && (job_id_local != job_id || block_found || should_stop)))
-                break;
-            chunk2.nonce = nonce;
+        uint32_t h_block_found = 0;
+        uint32_t h_winning_nonce = 0;
+        hash_t h_found_hash = {0};
 
-            memcpy(&ctx.r1_work_ctx, &ctx.r1_base_ctx, sizeof(SHA256_CTX));
-            memcpy(&ctx.r2_work_ctx, &ctx.r2_base_ctx, sizeof(SHA256_CTX));
-            SHA256_Transform(&ctx.r1_work_ctx, (void *)&chunk2);
-            hash_swap(ctx.r1_work_ctx.h);
-            ctx.r2.end = 0x80;
-            ctx.r2.len_be = htobe64(sizeof(hash_t) * 8);
-            SHA256_Transform(&ctx.r2_work_ctx, (void *)&ctx.r2);
-            hash_swap(ctx.r2_work_ctx.h);
+        cuda_sha256d_btc(
+                master_midstate.u32,
+                (void *)&chunk2,
+                global_target.u32,
+                start,
+                // threads_per_block,
+                // total_blocks,
+                4096,   // TODO: variable?
+                loop_cnt++ & 1,
+                &h_winning_nonce,
+                &h_block_found,
+                h_found_hash.u32
+        );
 
-            if (unlikely(hash_check(ctx.r2_work_ctx.h, global_target.u32))) {
-                if (__sync_bool_compare_and_swap(&block_found, 0, 1)) {
-                    winning_nonce = nonce;
-                    memcpy(found_block_hash.u8, ctx.r2_work_ctx.h, sizeof(found_block_hash));
+        if (unlikely(h_block_found) && __sync_bool_compare_and_swap(&block_found, 0, 1)) {
+            winning_nonce = h_winning_nonce;
+            memcpy(found_block_hash.u8, h_found_hash.u8, 32);
 
-                    printf("<%08x> ", winning_nonce);
-                    hash_dump(ctx.r2_work_ctx.h);
+            printf("<%08x> ", winning_nonce);
+            hash_dump(found_block_hash.u32);
 
-                    eventfd_write(edge_fd, 1);
-                    pthread_mutex_lock(&job_mutex);
-                    pthread_cond_broadcast(&job_cond);
-                    pthread_mutex_unlock(&job_mutex);
-                }
-                break;
-            }
+            eventfd_write(edge_fd, 1);
         }
     }
+    cuda_free();
     pthread_exit(0);
 }
 
@@ -153,6 +136,13 @@ miner_worker(void *arg)
 int
 main()
 {
+
+#ifdef CUDASHA256_TEST
+    if (cuda_sha256_test())
+        return 1;
+    // return 0;
+#endif
+
     // blocking SIGPIPE
     sigset_t signal_set;
     sigemptyset(&signal_set);
@@ -204,7 +194,8 @@ main()
             [FD_TIMER] = { .fd = timer_fd, .events = POLLIN, },
     };
 
-    nprocs = get_nprocs();
+    // nprocs = get_nprocs();
+    nprocs = 1;
     pthread_t threads[nprocs];
     worker_cfg_t cfgs[nprocs];
     for (int i = 0; i < nprocs; ++i) {
@@ -260,12 +251,14 @@ main()
                 hash_target_create(master_template.full.bits, global_target.u32);
                 // printf("target:    ");
                 // hash_dump(global_target.u32);
-                idle_workers = 0;
                 ++job_id;
                 nonce_cnt = 0;
                 block_found = 0;
                 pthread_cond_broadcast(&job_cond);
                 printf("new job\n");
+                for (int i = 0; i < 80; ++i)
+                    printf("%02x", master_template.u8[i]);
+                putchar('\n');
             }
         }
 
@@ -277,7 +270,6 @@ main()
                 send(fd, (void *)&winning_nonce, sizeof(winning_nonce), 0);
                 send(fd, &master_template.full.time, sizeof(master_template.full.time), 0);
                 // send(fd, found_block_hash.u8, 32, 0);
-                fsync(fd);
                 // block_found = 0;
                 __sync_lock_release(&block_found);
                 cmd = CMD_REQUEST;
@@ -291,10 +283,10 @@ main()
                     uint32_t t = time(0);
                     if (t != master_template.full.time) {
                         master_template.full.time = t;
-                        idle_workers = 0;
                         ++job_id;
                         nonce_cnt = 0;
-                        block_found = 0;
+                        // block_found = 0;
+                        __sync_lock_release(&block_found);
                         pthread_cond_broadcast(&job_cond);
                         // printf("new time\n");
                     } else {

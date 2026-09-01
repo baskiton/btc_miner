@@ -69,6 +69,7 @@ class Controller:
 
             if self.sk:
                 try:
+                    print('send', self.cur_job[4:].hex())
                     self.sk.sendall(self.cur_job)
                 except socket.error as e:
                     self.detach_miner(e)
@@ -93,7 +94,7 @@ class Controller:
             self.block.nonce = nonce
             self.block.timestamp = t
             b = self.block.serialize()
-            print('sending to net:', self.block.get_hash().hex())
+            print(f'sending ({nonce:08x}) to net:', self.block.get_hash().hex())
 
             try:
                 r = self.rpc.submit_block(b.hex())

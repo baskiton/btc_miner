@@ -87,7 +87,7 @@ class BtcRpcClient:
         return self._call('getblockchaininfo')
 
     def validate_address(self, addr):
-        return self._call('validateaddress', [addr])
+        return self._call('validateaddress', [str(addr)])
 
     def help(self, cmd=None):
         return self._call('help', cmd and [cmd])

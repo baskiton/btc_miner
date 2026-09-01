@@ -1,18 +1,45 @@
 cmake_minimum_required(VERSION 3.23)
-project(btcminer C)
+project(btcminer C CUDA)
 
 set(CMAKE_C_STANDARD 99)
 
+set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_ARCHITECTURES 86)
+
 add_compile_definitions(
-        CMAKE_C_COMPILER=gcc
         CMAKE_BUILD_TYPE=Release
 #        CMAKE_BUILD_TYPE=RelWithDebInfo
 #        CMAKE_BUILD_TYPE=Debug
+
+#        DEBUG_PRINT
+        CUDASHA256_NOSWAP=1
+        CUDASHA256_TEST
+#        CUDASHA256_NAIVE
 )
 
+add_library(cuda_miner STATIC
+        sha256.cu
+)
+set_target_properties(cuda_miner PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON)
+
 add_executable(btcminer
+        btc_miner.h
 #        main.c
         main2.c
+)
+
+add_executable(btcminer-cuda
+        btc_miner.h
+        main-cuda.c
+        test_cuda.c
+)
+
+target_compile_definitions(btcminer
+        PRIVATE CMAKE_C_COMPILER=gcc
+)
+target_compile_definitions(btcminer-cuda
+        PRIVATE CMAKE_C_COMPILER=gcc
 )
 
 target_compile_options(btcminer
@@ -21,4 +48,10 @@ target_compile_options(btcminer
 
 target_link_libraries(btcminer
         crypto
+)
+
+target_link_libraries(btcminer-cuda
+        PRIVATE cuda_miner
+        crypto
+        nvidia-ml
 )
