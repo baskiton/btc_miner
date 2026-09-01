@@ -62,10 +62,12 @@ miner_worker(void *arg)
     int threads_per_block = 768;
     int sm_count = 48;
     int blocks_per_sm = 4096;
-    int total_blocks = sm_count * blocks_per_sm;
     // uint32_t total_blocks = 48 * 88000; // full for one
     cuda_get_tuned(&threads_per_block, &sm_count);
-    uint64_t gpu_range = (uint64_t)threads_per_block * total_blocks;
+    uint64_t gpu_range = (uint64_t)threads_per_block * sm_count * blocks_per_sm;
+    int mul = (uint64_t)NONCE_MAX / gpu_range;
+    uint32_t last_range = NONCE_MAX - gpu_range * mul;
+    uint32_t last_bpsm = last_range / (threads_per_block * sm_count) + 1;
 
     while (1) {
         pthread_mutex_lock(&job_mutex);
@@ -91,10 +93,11 @@ miner_worker(void *arg)
         pthread_mutex_unlock(&job_mutex);
 
         uint64_t start = __sync_fetch_and_add(&nonce_cnt, gpu_range);
+        uint32_t bpsm = blocks_per_sm;
 
         if ((start + gpu_range) > NONCE_MAX) {
-            __sync_add_and_fetch(&tot_nonce_cnt, NONCE_MAX - start);
-            continue;
+            __sync_add_and_fetch(&tot_nonce_cnt, last_range);
+            bpsm = last_bpsm;
         }
         else
             __sync_add_and_fetch(&tot_nonce_cnt, gpu_range);
@@ -110,7 +113,7 @@ miner_worker(void *arg)
                 start,
                 // threads_per_block,
                 // total_blocks,
-                4096,   // TODO: variable?
+                bpsm,
                 loop_cnt++ & 1,
                 &h_winning_nonce,
                 &h_block_found,
