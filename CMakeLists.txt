@@ -18,7 +18,7 @@ add_compile_definitions(
 )
 
 add_library(cuda_miner STATIC
-        sha256.cu
+        src/sha256.cu
 )
 set_target_properties(cuda_miner PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
@@ -27,12 +27,15 @@ add_executable(btcminer
         btc_miner.h
 #        main.c
         main2.c
+        src/btc_miner.h
+#        src/main.c
+        src/main2.c
 )
 
 add_executable(btcminer-cuda
-        btc_miner.h
-        main-cuda.c
-        test_cuda.c
+        src/btc_miner.h
+        src/main-cuda.c
+        src/test_cuda.c
 )
 
 target_compile_definitions(btcminer
@@ -43,6 +46,10 @@ target_compile_definitions(btcminer-cuda
 )
 
 target_compile_options(btcminer
+        PRIVATE -pthread
+)
+
+target_compile_options(btcminer-cuda
         PRIVATE -pthread
 )
 
