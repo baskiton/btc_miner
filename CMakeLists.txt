@@ -4,7 +4,7 @@ project(btcminer C CUDA)
 set(CMAKE_C_STANDARD 99)
 
 set(CMAKE_CUDA_STANDARD 14)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+set(CMAKE_CUDA_ARCHITECTURES native)
 
 add_compile_definitions(
         CMAKE_BUILD_TYPE=Release
