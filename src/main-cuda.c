@@ -56,7 +56,9 @@ miner_worker(void *arg)
     cuda_init();
 
     uint32_t job_id_local = 0;
+    uint32_t job_upd = 0;
     chunk2_t chunk2;
+    hash_t midstate_local;
 
     uint32_t loop_cnt = 0;
     int threads_per_block = 768;
@@ -84,10 +86,13 @@ miner_worker(void *arg)
 
         if (unlikely(job_id_local != job_id)) {
             job_id_local = job_id;
+            job_upd = 2;
 #if CUDASHA256_NOSWAP
             chunk_swap32((void *)&chunk2, (void *)&master_template.chunks.c2, 16);
+            chunk_swap32(midstate_local.u32, master_midstate.u32, 8);
 #else
             memcpy(&chunk2, &master_template.chunks.c2, sizeof(chunk2));
+            memcpy(midstate_local.u32, master_midstate.u32, sizeof(midstate_local));
 #endif
         }
         pthread_mutex_unlock(&job_mutex);
@@ -107,7 +112,7 @@ miner_worker(void *arg)
         hash_t h_found_hash = {0};
 
         cuda_sha256d_btc(
-                master_midstate.u32,
+                midstate_local.u32,
                 (void *)&chunk2,
                 global_target.u32,
                 start,
@@ -115,6 +120,7 @@ miner_worker(void *arg)
                 // total_blocks,
                 bpsm,
                 loop_cnt++ & 1,
+                &job_upd,
                 &h_winning_nonce,
                 &h_block_found,
                 h_found_hash.u32
@@ -183,8 +189,8 @@ main()
         return 1;
     }
     struct itimerspec tspec = {
-            .it_interval = { .tv_sec = 60, },
-            .it_value = { .tv_sec = 60, },
+            .it_interval = { .tv_sec = 10, },
+            .it_value = { .tv_sec = 10, },
     };
     if (timerfd_settime(timer_fd, 0, &tspec, 0) < 0) {
         perror("timer_settime");
@@ -216,7 +222,7 @@ main()
                 .bits = 0,
                 .nonce = 0,
                 .end = 0x80,
-                .pad = {},
+                .pad = {0},
                 .len_be = htobe64(BLOCK_SZ * 8),
         },
     };
@@ -246,14 +252,20 @@ main()
                 break;
             }
             if (cmd == CMD_NEW_JOB) {
+                uint32_t old_bits = master_template.full.bits;
                 recv(fd, master_template.u8, sizeof(block_t), MSG_WAITALL);
+                for (int i = 0; i < 80; ++i)
+                    printf("%02x", master_template.u8[i]);
+                printf("\n");
                 SHA256_CTX ctx;
                 SHA256_Init(&ctx);
                 SHA256_Transform(&ctx, (void *)&master_template);
                 memcpy(master_midstate.u32, ctx.h, sizeof(master_midstate));
-                hash_target_create(master_template.full.bits, global_target.u32);
-                // printf("target:    ");
-                // hash_dump(global_target.u32);
+                if (master_template.full.bits != old_bits) {
+                    hash_target_create(master_template.full.bits, global_target.u32);
+                    printf("target:    ");
+                    hash_dump(global_target.u32);
+                }
                 ++job_id;
                 nonce_cnt = 0;
                 block_found = 0;
@@ -283,21 +295,22 @@ main()
             else {
                 // all nonces have been used up
                 if (unlikely(nonce_cnt >= NONCE_MAX)) {
-                    uint32_t t = time(0);
-                    if (t != master_template.full.time) {
-                        master_template.full.time = t;
+//                    uint32_t t = time(0);
+//                    if (t != master_template.full.time) {
+//                        master_template.full.time = t;
+                        ++master_template.full.time;
                         ++job_id;
                         nonce_cnt = 0;
                         // block_found = 0;
                         __sync_lock_release(&block_found);
                         pthread_cond_broadcast(&job_cond);
                         // printf("new time\n");
-                    } else {
-                        uint32_t cmd = CMD_REQUEST;
-                        send(fd, &cmd, sizeof(uint32_t), 0);
-                        fsync(fd);
-                        printf("requested\n");
-                    }
+//                    } else {
+//                        uint32_t cmd = CMD_REQUEST;
+//                        send(fd, &cmd, sizeof(uint32_t), 0);
+//                        fsync(fd);
+//                        printf("requested\n");
+//                    }
                 }
             }
         }
@@ -308,7 +321,7 @@ main()
             uint64_t cur_nonce = tot_nonce_cnt;
             uint64_t diff = cur_nonce - last_nonce;
             last_nonce = cur_nonce;
-            printf(" -> %6.2f MH/s\n", (double)diff / 60000000.0);
+            printf(" -> %6.2f MH/s\n", (double)diff / 10000000.0);
             fflush(stdout);
         }
 

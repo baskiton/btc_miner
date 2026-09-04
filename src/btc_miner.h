@@ -166,18 +166,19 @@ int cuda_sha256_test();
 
 extern void cuda_init();
 extern void cuda_free();
-extern void cuda_sha256(const uint8_t data[32], uint32_t hash[8]);
-extern void cuda_sha256d(const uint8_t data[32], uint32_t hash[8]);
-extern void cuda_sha256d_cont(uint32_t state[8], const uint8_t data[64], uint32_t hash[8]);
+extern void cuda_sha256(const uint32_t data[16], uint32_t hash[8]);
+extern void cuda_sha256d(const uint32_t data[16], uint32_t hash[8]);
+extern void cuda_sha256d_cont(const uint32_t state[8], const uint32_t data[16], uint32_t hash[8]);
 extern void cuda_sha256d_btc(
-        uint32_t state[8],
-        const uint8_t data[64],
-        uint32_t target[8],
+        const uint32_t state[8],
+        const uint32_t data[16],
+        const uint32_t target[8],
         uint64_t start_nonce,
         // uint32_t threads_per_block,
         // uint32_t total_blocks,
         uint32_t blocks_per_sm,
         uint32_t buf_idx,
+        uint32_t *job_upd,
         uint32_t *winning_nonce,
         uint32_t *block_found,
         uint32_t hash[8]);

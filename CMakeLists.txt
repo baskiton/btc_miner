@@ -11,10 +11,10 @@ add_compile_definitions(
 #        CMAKE_BUILD_TYPE=RelWithDebInfo
 #        CMAKE_BUILD_TYPE=Debug
 
+        OPENSSL_SUPPRESS_DEPRECATED
 #        DEBUG_PRINT
         CUDASHA256_NOSWAP=1
         CUDASHA256_TEST
-#        CUDASHA256_NAIVE
 )
 
 add_library(cuda_miner STATIC
@@ -22,11 +22,10 @@ add_library(cuda_miner STATIC
 )
 set_target_properties(cuda_miner PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
+target_compile_options(cuda_miner
+        PRIVATE --ptxas-options=-v)
 
 add_executable(btcminer
-        btc_miner.h
-#        main.c
-        main2.c
         src/btc_miner.h
 #        src/main.c
         src/main2.c

@@ -28,7 +28,7 @@ test_sha256(uint8_t data[64], uint32_t ref_hash[8])
     hash_dump(ctx.h);
 
     uint32_t result[8];
-    cuda_sha256(data, result);
+    cuda_sha256((uint32_t *)data, result);
     printf("CUDA: ");
     hash_dump(result);
 
@@ -65,7 +65,7 @@ test_sha256d(uint8_t data[64], uint32_t ref_hash[8])
     hash_dump(ctx1.h);
 
     uint32_t result[8];
-    cuda_sha256d(data, result);
+    cuda_sha256d((uint32_t *)data, result);
     printf("CUDA: ");
     hash_dump(result);
 
@@ -185,6 +185,7 @@ test_btc_block(uint8_t data[80], const uint32_t ref_hash[8], uint32_t ref_nonce)
             0,
             4096000,
             0,
+            &(uint32_t){1},
             &nonce,
             &block_found,
             result.u32);
