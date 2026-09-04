@@ -25,11 +25,10 @@ static int sm_count = 48;
 #define cuda_swap32(x) __byte_perm((x), 0, 0x0123)
 
 // Basic SHA-256 NIST spec
-#define ROTR(x, n)   (((x) >> (n)) | ((x) << (32 - (n))))
+// #define ROTR(x, n)   (((x) >> (n)) | ((x) << (32 - (n))))
+#define ROTR(x, n) __funnelshift_r((x), (x), (n))
 #define Ch(x, y, z)  (((x) & (y)) ^ (~(x) & (z)))
 #define Maj(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
-// #define Ch(x, y, z)  ((z) ^ ((x) & ((y) ^ (z))))
-// #define Maj(x, y, z) (((x) & (y)) ^ ((z) & ((x) ^ (y))))
 
 #define Sigma0(x) (ROTR((x), 2)  ^ ROTR((x), 13) ^ ROTR((x), 22))
 #define Sigma1(x) (ROTR((x), 6)  ^ ROTR((x), 11) ^ ROTR((x), 25))
@@ -439,17 +438,37 @@ _cuda_sha256d_btc(uint64_t start_nonce, uint32_t buf_idx)
     uint32_t hash[8];
     __cuda_sha256d_cont(state, ch2_local, hash);
 
+    // target check
     if (hash[7] > target[7])
         return;
-    // target check
-    #pragma unroll
-    for (int i = 7; i--;) {
-        if (hash[i] > target[i])
-            return;
-        if (hash[i] < target[i])
-            break;
-    }
-    if (!atomicCAS(&d_block_found[buf_idx], 0, 1)) {
+
+    uint32_t borrow;
+    asm volatile (
+            "sub.cc.u32 %0, %1, %2;\n\t"
+            "subc.cc.u32 %0, %3, %4;\n\t"
+            "subc.cc.u32 %0, %5, %6;\n\t"
+            "subc.cc.u32 %0, %7, %8;\n\t"
+            "subc.cc.u32 %0, %9, %10;\n\t"
+            "subc.cc.u32 %0, %11, %12;\n\t"
+            "subc.cc.u32 %0, %13, %14;\n\t"
+            "subc.u32    %0, %15, %16;"     // Последний шаг без '.cc' возвращает финальный заём
+            : "=r"(borrow)            // %0: выходной регистр
+            : "r"(hash[0]), "r"(target[0]), // %1, %2
+              "r"(hash[1]), "r"(target[1]), // %3, %4
+              "r"(hash[2]), "r"(target[2]), // %5, %6
+              "r"(hash[3]), "r"(target[3]), // %7, %8
+              "r"(hash[4]), "r"(target[4]), // %9, %10
+              "r"(hash[5]), "r"(target[5]), // %11, %12
+              "r"(hash[6]), "r"(target[6]), // %13, %14
+              "r"(hash[7]), "r"(target[7])  // %15, %16
+    );
+    uint32_t diff = (hash[0] ^ target[0]) | (hash[1] ^ target[1]) |
+                    (hash[2] ^ target[2]) | (hash[3] ^ target[3]) |
+                    (hash[4] ^ target[4]) | (hash[5] ^ target[5]) |
+                    (hash[6] ^ target[6]) | (hash[7] ^ target[7]);
+
+    if ((borrow > hash[7] || !(borrow | diff))
+            && !atomicCAS(&d_block_found[buf_idx], 0, 1)) {
         d_block_found[buf_idx] = 1;
 #if CUDASHA256_NOSWAP
         d_winning_nonce[buf_idx] = cuda_swap32(nonce);

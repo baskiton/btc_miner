@@ -304,7 +304,7 @@ main()
                         // block_found = 0;
                         __sync_lock_release(&block_found);
                         pthread_cond_broadcast(&job_cond);
-                        // printf("new time\n");
+                        // printf("new time %i\n", master_template.full.time);
 //                    } else {
 //                        uint32_t cmd = CMD_REQUEST;
 //                        send(fd, &cmd, sizeof(uint32_t), 0);
