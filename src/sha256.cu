@@ -439,18 +439,17 @@ _cuda_sha256d_btc(uint64_t start_nonce, uint32_t buf_idx)
     uint32_t hash[8];
     __cuda_sha256d_cont(state, ch2_local, hash);
 
+    if (hash[7] > target[7])
+        return;
     // target check
-    int success = 1;
     #pragma unroll
-    for (int i = 8; i--;) {
-        if (hash[i] > target[i]) {
-            success = 0;
-            break;
-        }
+    for (int i = 7; i--;) {
+        if (hash[i] > target[i])
+            return;
         if (hash[i] < target[i])
             break;
     }
-    if (success && !atomicCAS(&d_block_found[buf_idx], 0, 1)) {
+    if (!atomicCAS(&d_block_found[buf_idx], 0, 1)) {
         d_block_found[buf_idx] = 1;
 #if CUDASHA256_NOSWAP
         d_winning_nonce[buf_idx] = cuda_swap32(nonce);
@@ -458,7 +457,7 @@ _cuda_sha256d_btc(uint64_t start_nonce, uint32_t buf_idx)
         d_winning_nonce[buf_idx] = nonce;
 #endif
         #pragma unroll
-        for (int i = 0; i < 8; ++i)
+        for (int i = 8; i--;)
             d_found_hash[buf_idx][i] = hash[i];
     }
 }

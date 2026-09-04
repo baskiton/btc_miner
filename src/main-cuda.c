@@ -89,7 +89,7 @@ miner_worker(void *arg)
             job_upd = 2;
 #if CUDASHA256_NOSWAP
             chunk_swap32((void *)&chunk2, (void *)&master_template.chunks.c2, 16);
-            chunk_swap32(midstate_local.u32, master_midstate.u32, 8);
+            memcpy(midstate_local.u32, master_midstate.u32, sizeof(midstate_local));
 #else
             memcpy(&chunk2, &master_template.chunks.c2, sizeof(chunk2));
             memcpy(midstate_local.u32, master_midstate.u32, sizeof(midstate_local));
