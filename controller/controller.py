@@ -135,7 +135,7 @@ class Controller:
                 now = time.time()
 
                 if prev_hash != self.cur_prev_hash or cur_lpid is None:
-                    print(f'[{datetime.datetime.now().time().strftime("%H:%M:%S")}] Net updated: date={datetime.datetime.fromtimestamp(tmpl["curtime"]).isoformat()} height={tmpl["height"]} bits={bits} txs={len(tmpl["transactions"])}')
+                    print(f'[{datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S")}] Net updated: date={datetime.datetime.fromtimestamp(tmpl["curtime"]).isoformat()} height={tmpl["height"]} bits={bits} txs={len(tmpl["transactions"])}')
                     self.cur_tmpl = tmpl
                     self.cur_prev_hash = prev_hash
                     self.cur_bits = bits
@@ -143,8 +143,8 @@ class Controller:
                     t = now
                     self.send_new_job()
 
-                elif now - t > 120 and tmpl["transactions"] != self.cur_tmpl["transactions"]:
-                    print(f'[{datetime.datetime.now().time().strftime("%H:%M:%S")}] New transactions: date={datetime.datetime.fromtimestamp(tmpl["curtime"]).isoformat()} height={tmpl["height"]} bits={bits} txs={len(tmpl["transactions"])}')
+                elif (now - t) > 300 and tmpl["transactions"] != self.cur_tmpl["transactions"]:
+                    print(f'[{datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S")}] New transactions: date={datetime.datetime.fromtimestamp(tmpl["curtime"]).isoformat()} height={tmpl["height"]} bits={bits} txs={len(tmpl["transactions"])}')
                     self.cur_tmpl = tmpl
                     t = now
                     self.send_new_job()
