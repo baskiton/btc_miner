@@ -14,6 +14,8 @@
 
 #ifdef CUDASHA256_TEST
 
+#ifndef CUDASHA256_BITCOIN_ONLY
+
 static int
 test_sha256(uint8_t data[64], uint32_t ref_hash[8])
 {
@@ -135,6 +137,8 @@ test_bitcoin_hash(uint8_t data[80], uint32_t ref_hash[8])
     return !ret;
 }
 
+#endif
+
 static int
 test_btc_block(uint8_t data[80], const uint32_t ref_hash[8], uint32_t ref_nonce)
 {
@@ -191,6 +195,7 @@ test_btc_block(uint8_t data[80], const uint32_t ref_hash[8], uint32_t ref_nonce)
             result.u32);
     printf("found: %u\n", block_found);
     printf("nonce: %u\n", nonce);
+    printf("nonch: %08x\n", nonce);
     printf("CUDA: ");
     hash_dump(result.u32);
 
@@ -204,6 +209,8 @@ int cuda_sha256_test() {
 
     int ret = 0;
     uint8_t data[128] = "\x01\x00\x00\x00\x81\xcd\x02\xab\x7e\x56\x9e\x8b\xcd\x93\x17\xe2\xfe\x99\xf2\xde\x44\xd4\x9a\xb2\xb8\x85\x1b\xa4\xa3\x08\x00\x00\x00\x00\x00\x00\xe3\x20\xb6\xc2\xff\xfc\x8d\x75\x04\x23\xdb\x8b\x1e\xb9\x42\xae\x71\x0e\x95\x1e\xd7\x97\xf7\xaf\xfc\x88\x92\xb0\xf1\xfc\x12\x2b\xc7\xf5\xd7\x4d\xf2\xb9\x44\x1a\x42\xa1\x46\x95";
+
+#ifndef CUDASHA256_BITCOIN_ONLY
 
     uint32_t test1_ref[8] = {
             0x9524c593, 0x05c56713, 0x16e669ba, 0x2d2810a0,
@@ -224,7 +231,14 @@ int cuda_sha256_test() {
     };
     ret |= test_bitcoin_hash(data, (void *)test3_ref);
 
-    ret |= test_btc_block(data, (void *)test3_ref, 0x9546a142);
+#endif
+
+    // 00000000 00000000 1e8d6829 a8a21adc 5d38d0a4 73b144b6 765798e6 1f98bd1d
+    uint32_t test4_ref[8] = {
+            0x1f98bd1d, 0x765798e6, 0x73b144b6, 0x5d38d0a4,
+            0xa8a21adc, 0x1e8d6829, 0x00000000, 0x00000000,
+    };
+    ret |= test_btc_block(data, (void *)test4_ref, 0x9546a142);
 
     cuda_free();
 

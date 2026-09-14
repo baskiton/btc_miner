@@ -1,8 +1,22 @@
 #ifndef BTCMINER_BTC_MINER_H
 #define BTCMINER_BTC_MINER_H
 
-#include <stdint.h>
+#include <endian.h>
+#include <errno.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/sysinfo.h>
+#include <sys/timerfd.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <openssl/sha.h>
 
@@ -16,6 +30,7 @@
 #define FD_CTRL 0
 #define FD_WORKER 1
 #define FD_TIMER 2
+#define FDS_SZ 3
 
 // commands ////////////////////////////////////////////////////////////////////
 
@@ -98,6 +113,30 @@ typedef struct {
     uint64_t len_be;
 } round2_block_t;
 
+// global variables ////////////////////////////////////////////////////////////
+
+extern volatile uint64_t nonce_cnt;
+extern volatile uint64_t tot_nonce_cnt;
+extern volatile uint32_t job_id;
+extern volatile uint32_t winning_nonce;
+extern volatile int block_found;
+extern volatile int should_stop;
+extern volatile int idle_workers;
+extern int nprocs;
+extern int sk_fd;
+extern int edge_fd;
+extern int timer_fd;
+
+extern block128_t master_template;
+extern hash_t master_midstate;
+extern hash_t global_target;
+extern hash_t found_block_hash;
+
+extern pthread_mutex_t job_mutex;
+extern pthread_cond_t job_cond;
+
+////////////////////////////////////////////////////////////////////////////////
+
 static void
 chunk_swap32(uint32_t *d, uint32_t *s, int n)
 {
@@ -160,15 +199,46 @@ hash_target_create(uint32_t bits, uint32_t target[8])
     // target[a_idx - !!a_idx] |= ((c >> 1) >> (31 - a_sh)) * !!a_idx;
 }
 
+static int inline
+hash_check(const uint32_t h[8], const uint32_t t[8])
+{
+    for (int i = 8; i--;) {
+        if (likely(h[i] > t[i]))
+            return 0;
+        if (unlikely(h[i] < t[i]))
+            return 1;
+    }
+    return 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+    int thread_id;
+} worker_cfg_t;
+
+void *miner_worker_cpu(void *arg);
+int miner_loop(void *(*worker)(void *), int with_socket, int timer_v);
+
+////////////////////////////////////////////////////////////////////////////////
+
+#if (WITH_CUDA)
+
 #ifdef CUDASHA256_TEST
 int cuda_sha256_test();
 #endif
 
 extern void cuda_init();
 extern void cuda_free();
+
+#ifndef CUDASHA256_BITCOIN_ONLY
+
 extern void cuda_sha256(const uint32_t data[16], uint32_t hash[8]);
 extern void cuda_sha256d(const uint32_t data[16], uint32_t hash[8]);
 extern void cuda_sha256d_cont(const uint32_t state[8], const uint32_t data[16], uint32_t hash[8]);
+
+#endif
+
 extern void cuda_sha256d_btc(
         const uint32_t state[8],
         const uint32_t data[16],
@@ -183,5 +253,7 @@ extern void cuda_sha256d_btc(
         uint32_t *block_found,
         uint32_t hash[8]);
 extern void cuda_get_tuned(int *h_threads_per_block, int *h_sm_count);
+
+#endif //WITH_CUDA
 
 #endif //BTCMINER_BTC_MINER_H

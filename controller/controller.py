@@ -54,7 +54,12 @@ class Controller:
             cur_time = t['curtime']
 
             self.cb_tx = Transaction(
-                coinbase=CbDict(block_heigt=t['height'], reward=t['coinbasevalue'], pk_script=self.pk_script, cmds=[Op.OP_0, self.extra_nonce, b'@baskiton']),
+                coinbase=CbDict(
+                    block_heigt=t['height'],
+                    reward=t['coinbasevalue'],
+                    pk_script=self.pk_script,
+                    cmds=[Op.OP_0, self.extra_nonce, b'@baskiton\nhttps://github.com/baskiton/btc_miner']
+                ),
             )
             w = t.get('default_witness_commitment')
             if w:

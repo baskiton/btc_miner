@@ -2,50 +2,13 @@
 #define _GNU_SOURCE 1
 #endif
 
-#include <endian.h>
-#include <errno.h>
-#include <poll.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
-#include <sys/socket.h>
-#include <sys/timerfd.h>
-#include <sys/un.h>
-#include <time.h>
-#include <unistd.h>
-
-#include <openssl/sha.h>
 
 #include "btc_miner.h"
-
-
-// global variables ////////////////////////////////////////////////////////////
-volatile uint64_t nonce_cnt = 0;
-volatile uint64_t tot_nonce_cnt = 0;
-volatile uint32_t job_id = 0;
-volatile uint32_t winning_nonce = 0;
-volatile int block_found = 0;
-volatile int should_stop = 0;
-int nprocs = 0;
-int edge_fd = -1;
-
-block128_t master_template = {};
-hash_t master_midstate = {};
-hash_t global_target = {};
-hash_t found_block_hash = {};
-
-pthread_mutex_t job_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t job_cond = PTHREAD_COND_INITIALIZER;
-
-// thread pool /////////////////////////////////////////////////////////////////
-
-typedef struct {
-    int thread_id;
-} worker_cfg_t;
 
 void *
 miner_worker(void *arg)
@@ -145,191 +108,14 @@ miner_worker(void *arg)
 int
 main()
 {
-
 #ifdef CUDASHA256_TEST
+    // cuda_sha256_test();
     if (cuda_sha256_test())
         return 1;
     // return 0;
 #endif
 
-    // blocking SIGPIPE
-    sigset_t signal_set;
-    sigemptyset(&signal_set);
-    sigaddset(&signal_set, SIGPIPE);
-    pthread_sigmask(SIG_BLOCK, &signal_set, NULL);
-
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        perror("socket");
-        return 1;
-    }
-    struct sockaddr_un addr = {
-            .sun_family = AF_UNIX,
-            .sun_path = SOCKET_NAME,
-    };
-    printf("Connect to controller... ");
-    fflush(stdout);
-    while (connect(fd, &addr, offsetof(struct sockaddr_un, sun_path) + sizeof(SOCKET_NAME) - 1) < 0) {
-        if (errno == ECONNREFUSED || errno == ENOENT) {
-            sleep(1);
-            continue;
-        }
-        perror("connect");
-        return 1;
-    }
-    printf("Done!\n");
-
-    if ((edge_fd = eventfd(0, EFD_NONBLOCK)) < 0) {
-        perror("eventfd");
-        return 1;
-    }
-    int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-    if (timer_fd < 0) {
-        perror("timer_fd");
-        return 1;
-    }
-    struct itimerspec tspec = {
-            .it_interval = { .tv_sec = 10, },
-            .it_value = { .tv_sec = 10, },
-    };
-    if (timerfd_settime(timer_fd, 0, &tspec, 0) < 0) {
-        perror("timer_settime");
-        return 1;
-    }
-
-    struct pollfd fds[] = {
-            [FD_CTRL] = { .fd = fd, .events = POLLIN, },
-            [FD_WORKER] = { .fd = edge_fd, .events = POLLIN, },
-            [FD_TIMER] = { .fd = timer_fd, .events = POLLIN, },
-    };
-
-    // nprocs = get_nprocs();
     nprocs = 1;
-    pthread_t threads[nprocs];
-    worker_cfg_t cfgs[nprocs];
-    for (int i = 0; i < nprocs; ++i) {
-        cfgs[i].thread_id = i;
-        pthread_create(&threads[i], 0, miner_worker, &cfgs[i]);
-    }
 
-    uint64_t last_nonce = 0;
-    master_template = (block128_t) {
-        .full = {
-                .ver = 3,
-                .prev_hash = {},
-                .merkle_root = {},
-                .time = 0,
-                .bits = 0,
-                .nonce = 0,
-                .end = 0x80,
-                .pad = {0},
-                .len_be = htobe64(BLOCK_SZ * 8),
-        },
-    };
-
-    while (!should_stop) {
-        int rdy = poll(fds, sizeof(fds) / sizeof(*fds), -1);
-        if (rdy == -1) {
-            if (errno == EINTR)
-                continue;
-            perror("poll");
-            break;
-        }
-        if (!rdy)
-            continue;
-
-        pthread_mutex_lock(&job_mutex);
-
-        if (fds[FD_CTRL].revents & POLLIN) {
-            int32_t cmd;
-            ssize_t sz = recv(fd, &cmd, sizeof(cmd), MSG_WAITALL);
-
-            if (sz <= 0 || cmd == CMD_STOP) {
-                printf("STOP!%s%s\n", (sz>0)? "": " [Error] ", (sz>0)? "": strerror(errno));
-                should_stop = 1;
-                pthread_cond_broadcast(&job_cond);
-                pthread_mutex_unlock(&job_mutex);
-                break;
-            }
-            if (cmd == CMD_NEW_JOB) {
-                uint32_t old_bits = master_template.full.bits;
-                recv(fd, master_template.u8, sizeof(block_t), MSG_WAITALL);
-                for (int i = 0; i < 80; ++i)
-                    printf("%02x", master_template.u8[i]);
-                printf("\n");
-                SHA256_CTX ctx;
-                SHA256_Init(&ctx);
-                SHA256_Transform(&ctx, (void *)&master_template);
-                memcpy(master_midstate.u32, ctx.h, sizeof(master_midstate));
-                if (master_template.full.bits != old_bits) {
-                    hash_target_create(master_template.full.bits, global_target.u32);
-                    printf("target:    ");
-                    hash_dump(global_target.u32);
-                }
-                ++job_id;
-                nonce_cnt = 0;
-                block_found = 0;
-                pthread_cond_broadcast(&job_cond);
-                printf("new job\n");
-                for (int i = 0; i < 80; ++i)
-                    printf("%02x", master_template.u8[i]);
-                putchar('\n');
-            }
-        }
-
-        if (fds[FD_WORKER].revents & POLLIN) {
-            eventfd_read(edge_fd, &(eventfd_t){0});
-            if (block_found) {
-                uint32_t cmd = CMD_FOUND;
-                send(fd, &cmd, sizeof(uint32_t), 0);
-                send(fd, (void *)&winning_nonce, sizeof(winning_nonce), 0);
-                send(fd, &master_template.full.time, sizeof(master_template.full.time), 0);
-                // send(fd, found_block_hash.u8, 32, 0);
-                // block_found = 0;
-                __sync_lock_release(&block_found);
-                cmd = CMD_REQUEST;
-                send(fd, &cmd, sizeof(uint32_t), 0);
-                fsync(fd);
-                printf("reported & requested\n");
-            }
-            else {
-                // all nonces have been used up
-                if (unlikely(nonce_cnt >= NONCE_MAX)) {
-//                    uint32_t t = time(0);
-//                    if (t != master_template.full.time) {
-//                        master_template.full.time = t;
-                        ++master_template.full.time;
-                        ++job_id;
-                        nonce_cnt = 0;
-                        // block_found = 0;
-                        __sync_lock_release(&block_found);
-                        pthread_cond_broadcast(&job_cond);
-                        // printf("new time %i\n", master_template.full.time);
-//                    } else {
-//                        uint32_t cmd = CMD_REQUEST;
-//                        send(fd, &cmd, sizeof(uint32_t), 0);
-//                        fsync(fd);
-//                        printf("requested\n");
-//                    }
-                }
-            }
-        }
-
-        if (fds[FD_TIMER].revents & POLLIN) {
-            read(timer_fd, &(uint64_t){0}, sizeof(uint64_t));
-
-            uint64_t cur_nonce = tot_nonce_cnt;
-            uint64_t diff = cur_nonce - last_nonce;
-            last_nonce = cur_nonce;
-            printf(" -> %6.2f MH/s\n", (double)diff / 10000000.0);
-            fflush(stdout);
-        }
-
-        pthread_mutex_unlock(&job_mutex);
-    }
-
-    for (int i = 0; i < nprocs; ++i)
-        pthread_join(threads[i], 0);
-
-    return 0;
+    return miner_loop(miner_worker, 1, 60);
 }

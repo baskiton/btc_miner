@@ -7,5 +7,5 @@
 int
 main()
 {
-    return miner_loop(miner_worker_cpu, 1, 60);
+    return miner_loop(miner_worker_cpu, 0, 10);
 }

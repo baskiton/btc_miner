@@ -44,6 +44,8 @@ static int sm_count = 48;
 } while (0)
 #define SCHEDULE(w0, w1, w9, w14) (sigma1((w14)) + (w9) + sigma0((w1)) + (w0))
 
+#ifndef CUDASHA256_BITCOIN_ONLY
+
 static __device__ __forceinline__ void
 _cuda_sha256_transform_optimized(uint32_t state[8], const uint32_t data[16])
 {
@@ -203,6 +205,8 @@ _cuda_sha256_transform_optimized(uint32_t state[8], const uint32_t data[16])
     state[7] += h;
 }
 
+#endif
+
 #define ROUND_BUF(v, k, w) do { \
     uint32_t _t1 = v[7] + Sigma1(v[4]) + Ch(v[4], v[5], v[6]) + (k) + (w); \
     uint32_t _t2 = Sigma0(v[0]) + Maj(v[0], v[1], v[2]); \
@@ -277,6 +281,8 @@ _cuda_sha256_init(uint32_t state[8])
     state[7] = 0x5be0cd19;
 }
 
+#ifndef CUDASHA256_BITCOIN_ONLY
+
 static __global__ void
 _cuda_sha256(const uint32_t data[16], uint32_t hash[8])
 {
@@ -315,6 +321,8 @@ _cuda_sha256d(const uint32_t data[16], uint32_t hash[8])
     for (int i = 0; i < 8; ++i)
         hash[i] = state1[i];
 }
+
+#endif
 
 static __device__ __forceinline__ void
 __cuda_sha256d_cont(uint32_t state0[8], const uint32_t data[16], uint32_t hash[8])
@@ -361,6 +369,8 @@ __cuda_sha256d_cont(uint32_t state0[8], const uint32_t data[16], uint32_t hash[8
         hash[i] = cuda_swap32(hash[i]);
 #endif
 }
+
+#ifndef CUDASHA256_BITCOIN_ONLY
 
 static __device__ __forceinline__ void
 __cuda_sha256d_cont2(uint32_t state0[8], const uint32_t data[16], uint32_t hash[8])
@@ -409,6 +419,8 @@ _cuda_sha256d_cont(uint32_t state0[8], const uint32_t data[16], uint32_t hash[8]
 {
     __cuda_sha256d_cont(state0, data, hash);
 }
+
+#endif
 
 static __global__ void
 _cuda_sha256d_btc(uint64_t start_nonce, uint32_t buf_idx)
@@ -526,6 +538,8 @@ cuda_free()
     init = 0;
 }
 
+#ifndef CUDASHA256_BITCOIN_ONLY
+
 void
 cuda_sha256(const uint32_t data[16], uint32_t hash[8])
 {
@@ -583,6 +597,8 @@ cuda_sha256d_cont(const uint32_t state[8], const uint32_t data[16], uint32_t has
     cudaFree(cuda_hash);
     cudaFree(cuda_state);
 }
+
+#endif
 
 void
 cuda_sha256d_btc(
