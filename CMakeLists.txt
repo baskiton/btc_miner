@@ -4,7 +4,7 @@ project(btcminer C)
 set(CMAKE_C_STANDARD 99)
 
 set(CMAKE_CUDA_STANDARD 14)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+set(CMAKE_CUDA_ARCHITECTURES native)
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
