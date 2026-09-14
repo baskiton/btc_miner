@@ -64,6 +64,7 @@ if (CUDAToolkit_FOUND)
             src/main-cuda.c
             src/test_cuda.c
             src/common.c
+            src/common-cuda.c
     )
     target_link_libraries(btcminer-cuda
             PRIVATE
@@ -72,6 +73,21 @@ if (CUDAToolkit_FOUND)
             OpenSSL::Crypto
             CUDA::nvml
     )
+
+    add_executable(benchmark-cuda
+            src/btc_miner.h
+            src/benchmark-cuda.c
+            src/common.c
+            src/common-cuda.c
+    )
+    target_link_libraries(benchmark-cuda
+            PRIVATE
+            cuda_miner
+            Threads::Threads
+            OpenSSL::Crypto
+            CUDA::nvml
+    )
+
 else ()
     message(WARNING "CUDA Toolkit NOT found")
 endif ()

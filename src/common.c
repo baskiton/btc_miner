@@ -202,7 +202,8 @@ miner_loop(void *(*worker)(void *), int with_socket, int timer_v)
             [FD_TIMER] = { .fd = timer_fd, .events = POLLIN, },
     };
 
-    nprocs = get_nprocs();
+    if (!nprocs)
+        nprocs = get_nprocs();
     pthread_t threads[nprocs];
     worker_cfg_t cfgs[nprocs];
     for (int i = 0; i < nprocs; ++i) {

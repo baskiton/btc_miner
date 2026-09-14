@@ -254,6 +254,8 @@ extern void cuda_sha256d_btc(
         uint32_t hash[8]);
 extern void cuda_get_tuned(int *h_threads_per_block, int *h_sm_count);
 
+void *miner_worker_cuda(void *arg);
+
 #endif //WITH_CUDA
 
 #endif //BTCMINER_BTC_MINER_H
